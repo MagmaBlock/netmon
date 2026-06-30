@@ -186,8 +186,81 @@ func collectIfaceDetail(iface string) ifaceDetail {
 	case "linux":
 		return ifaceDetailLinux(iface)
 	case "windows":
-		// Windows 暂不通过单一接口拿到 MAC/MTU（解析 ipconfig /all 复杂），保留基础
+		return ifaceDetailWindows(iface)
+	}
+	return d
+}
+
+// ifaceDetailWindows 用 PowerShell Get-NetAdapter / Get-NetIPAddress /
+// Get-NetIPInterface / Get-NetAdapterStatistics 获取单块网卡的详尽信息，
+// 不再解析 ipconfig /all（中文版字段名为中文且输出含 GBK 字节）。
+func ifaceDetailWindows(iface string) ifaceDetail {
+	d := ifaceDetail{Name: iface}
+	if iface == "" {
 		return d
+	}
+	// PowerShell -Command 之后的额外参数不会绑定到脚本的 param()，
+	// 这里把接口名（单引号包裹，内部单引号转义为 '')直接嵌入脚本。
+	alias := strings.ReplaceAll(iface, "'", "''")
+	const script = `$ErrorActionPreference = 'SilentlyContinue'
+$a = Get-NetAdapter -Name '%s'
+if (-not $a) { $a = Get-NetAdapter | Where-Object { $_.InterfaceDescription -eq '%s' } }
+if (-not $a) { exit 1 }
+$idx = $a.InterfaceIndex
+$ip  = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1
+$nli = Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4
+$ip6 = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv6   | Where-Object { $_.PrefixOrigin -eq 'Global' -or $_.PrefixOrigin -eq 'Dhcp' -or $_.PrefixOrigin -eq 'RouterAdvertisement' } | Select-Object -First 1
+$stat = Get-NetAdapterStatistics -Name $a.Name
+"ALIAS="   + $a.Name
+"MAC="     + $a.MacAddress
+"MTU="     + $nli.NlMtu
+"STATUS="  + $a.Status
+if ($ip)  { "IP="  + $ip.IPAddress  + "/" + $ip.PrefixLength }
+if ($ip6) { "IP6=" + $ip6.IPAddress }
+if ($stat) {
+	"RX=" + $stat.ReceivedBytes
+	"TX=" + $stat.OutboundBytes
+}`
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(script, alias, alias)).Output()
+	if err != nil {
+		return d
+	}
+	for _, line := range strings.Split(decodeLocal(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "ALIAS="):
+			d.Name = strings.TrimPrefix(line, "ALIAS=")
+		case strings.HasPrefix(line, "MAC="):
+			d.MAC = strings.TrimPrefix(line, "MAC=")
+		case strings.HasPrefix(line, "MTU="):
+			d.MTU = strings.TrimPrefix(line, "MTU=")
+		case strings.HasPrefix(line, "STATUS="):
+			st := strings.TrimPrefix(line, "STATUS=")
+			d.Status = st
+			if strings.EqualFold(st, "Up") {
+				d.Status = "up"
+			} else if strings.EqualFold(st, "Disabled") || strings.EqualFold(st, "Disconnected") {
+				d.Status = "down"
+			}
+		case strings.HasPrefix(line, "IP="):
+			ipstr := strings.TrimPrefix(line, "IP=")
+			fields := strings.Split(ipstr, "/")
+			d.IPv4 = fields[0]
+			if len(fields) > 1 {
+				d.Mask = cidrToMask(fields[1])
+			}
+		case strings.HasPrefix(line, "IP6="):
+			d.IPv6 = strings.TrimPrefix(line, "IP6=")
+		case strings.HasPrefix(line, "RX="):
+			n, _ := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "RX=")), 10, 64)
+			d.RxBytes = n
+			d.HasStat = true
+		case strings.HasPrefix(line, "TX="):
+			n, _ := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "TX=")), 10, 64)
+			d.TxBytes = n
+			d.HasStat = true
+		}
 	}
 	return d
 }
@@ -333,12 +406,22 @@ func collectDNSServers() []string {
 		}
 		return nil
 	case "windows":
-		out, err := exec.Command("ipconfig", "/all").Output()
+		const script = `Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Sort-Object -Unique`
+		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
 		if err != nil {
 			return nil
 		}
-		return uniqueSorted(regexp.MustCompile(`DNS Servers.+:.*?(\d+\.\d+\.\d+\.\d+)`).
-			FindAllStringSubmatch(string(out), -1))
+		var servers []string
+		seen := map[string]bool{}
+		for _, line := range strings.Split(decodeLocal(out), "\n") {
+			v := strings.TrimSpace(line)
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			servers = append(servers, v)
+		}
+		return servers
 	}
 	return nil
 }
@@ -364,12 +447,12 @@ func gatewayPingHealth(gw string, count int) gatewayHealth {
 	}
 	args := pingHealthArgs(count)
 	args = append(args, gw)
-	out, _ := exec.Command("ping", args...).CombinedOutput()
+	out, _ := commandCombinedOutput("ping", args...)
 	// 即使有丢包 ping 也可能 exit 1 但输出可解析
-	if out == nil {
+	if out == "" {
 		return gatewayHealth{}
 	}
-	s := string(out)
+	s := out
 	h := gatewayHealth{OK: true}
 	// 看到任何 packets transmitted 即认为跑了
 	if !strings.Contains(s, "packets transmitted") && !strings.Contains(s, "Packets:") && !strings.Contains(s, "已发送") {

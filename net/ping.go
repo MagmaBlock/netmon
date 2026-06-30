@@ -47,7 +47,7 @@ func Ping(ctx context.Context, host string, ch chan string) error {
 	}
 	go func() {
 		defer close(ch)
-		sc := bufio.NewScanner(stdout)
+		sc := bufio.NewScanner(localReader(stdout))
 		sc.Buffer(make([]byte, 0, 4096), 64*1024)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())

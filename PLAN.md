@@ -64,7 +64,7 @@ GOOS=windows GOARCH=amd64 go build -o dist/netmon-windows-amd64.exe
 - **平台差异（取网关）**：
   - macOS：`route -n get default` → 解析 `gateway:`
   - Linux：`ip route` → 解析 `default via X`，或 `route -n` 兜底
-  - Windows：`route print` → 解析 `0.0.0.0  0.0.0.0  X.X.X.X`
+  - Windows：优先 `Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort RouteMetric`（含 metric 选最低，避开 Radmin VPN/Tailscale 等虚拟网卡注册的 0.0.0.0 抢先匹配）；`route print` 按 metric 兜底
 - **实现**：平台分派函数 `defaultGateway() (ip, iface string, err error)`
 
 ### 5. 网络信息（排障与质量向）
@@ -75,14 +75,15 @@ GOOS=windows GOARCH=amd64 go build -o dist/netmon-windows-amd64.exe
   - macOS：`ifconfig` + `netstat -bi`（按表头列名定位 Ibytes/Obytes）
   - Linux：`ip addr show` + `/proc/net/dev`
 - **DNS**：服务器列表 + 实测一次 `www.baidu.com` 解析延迟（毫秒）
-  - macOS：`scutil --dns` / Linux：`resolvectl status` 兜底 `/etc/resolv.conf` / Windows：`ipconfig /all`
+  - macOS：`scutil --dns` / Linux：`resolvectl status` 兜底 `/etc/resolv.conf` / Windows：`Get-DnsClientServerAddress`
 - **网关连通性**：对默认网关跑 4 次 ping，提取最小延迟与丢包率（正则适配 macOS `round-trip`、Linux `rtt`、Windows 中英文）
 - **并发收集**：网卡详情 / DNS / DNS延迟 / 网关ping / 公网IP 五路 goroutine 并发；三个 itdog 请求串行避免限流
 - **平台差异最大**，按平台分派收集：
   - **macOS**：`ifconfig`、`scutil --dns`、`netstat -bi`
   - **Linux**：`ip addr`、`resolvectl status` 或 `/etc/resolv.conf`、`/proc/net/dev`
-  - **Windows**：`ipconfig /all`
-- **子网掩码**：macOS ifconfig 返回十六进制 `0xffffff00` → 转点分十进制；Linux 由 CIDR 转换；Windows 直接点分
+  - **Windows**：`Get-NetAdapter` / `Get-NetIPAddress` / `Get-NetIPInterface` / `Get-NetAdapterStatistics`（PowerShell cmdlet，输出 UTF-8，含网卡状态/MAC/MTU/IPv4+前缀/IPv6/RX/TX）
+- **子网掩码**：macOS ifconfig 返回十六进制 `0xffffff00` → 转点分十进制；Linux 由 CIDR 转换；Windows 由 `Get-NetIPAddress` PrefixLength 按 CIDR 转换
+- **Windows 中文编码**：`ping` / `ipconfig` / `route print` 等进程在中文系统使用 GBK（CP936）代码页输出，直接按 UTF-8 处理会乱码；统一用 `golang.org/x/text/encoding/simplifiedchinese.GBK` 解码 stdout（流式与批量两种入口），中文字段（如「时间」「请求超时」「已发送」「丢失」）正则在解码后的 UTF-8 上匹配
 - **实现**：`collectNetworkInfo() []string`，内部 `switch runtime.GOOS`
 
 ### 6. 打开网页

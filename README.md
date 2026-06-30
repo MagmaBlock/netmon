@@ -33,7 +33,7 @@
 |------|------|--------|------|
 | macOS | darwin  | arm64 / amd64 | 当前开发机 |
 | Linux | linux   | amd64 / arm64 | 服务器 / 桌面 / 树莓派 |
-| Windows | windows | amd64 | Win10+ 终端推荐 |
+| Windows | windows | amd64 | Win10+ 默认 PowerShell（用于取网关/网卡/DNS） |
 
 ICMP 走系统 `ping` 命令（无需 root）；TCP/测速/公网IP 走纯 Go，单二进制开箱即用。
 
