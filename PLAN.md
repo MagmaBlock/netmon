@@ -67,13 +67,22 @@ GOOS=windows GOARCH=amd64 go build -o dist/netmon-windows-amd64.exe
   - Windows：`route print` → 解析 `0.0.0.0  0.0.0.0  X.X.X.X`
 - **实现**：平台分派函数 `defaultGateway() (ip, iface string, err error)`
 
-### 5. 网络信息（IP/DHCP/网关/掩码/DNS/公网IP）
+### 5. 网络信息（排障与质量向）
+- **公网 IP**：走 itdog 三端点
+  - IPv4：`curl 4.itdog.cn` / IPv6：`curl 6.itdog.cn` / 优先版：`curl v.itdog.cn`
+  - 归属地：再请求 `ipinfo.io/<ip>/json`，拼接 `city / region / country  [org]`
+- **网卡详情**：状态(active/up/down)、MAC、MTU、IPv4、子网掩码、IPv6、RX/TX 字节流量
+  - macOS：`ifconfig` + `netstat -bi`（按表头列名定位 Ibytes/Obytes）
+  - Linux：`ip addr show` + `/proc/net/dev`
+- **DNS**：服务器列表 + 实测一次 `www.baidu.com` 解析延迟（毫秒）
+  - macOS：`scutil --dns` / Linux：`resolvectl status` 兜底 `/etc/resolv.conf` / Windows：`ipconfig /all`
+- **网关连通性**：对默认网关跑 4 次 ping，提取最小延迟与丢包率（正则适配 macOS `round-trip`、Linux `rtt`、Windows 中英文）
+- **并发收集**：网卡详情 / DNS / DNS延迟 / 网关ping / 公网IP 五路 goroutine 并发；三个 itdog 请求串行避免限流
 - **平台差异最大**，按平台分派收集：
-  - **macOS**：`ifconfig`、`ipconfig getpacket`（DHCP）、`scutil --dns`（DNS）
-  - **Linux**：`ip addr`（IP/掩码）、`resolvectl status` 或 `/etc/resolv.conf`（DNS）、DHCP 依赖 NetworkManager（`nmcli`）或 dhclient lease 文件
-  - **Windows**：`ipconfig /all`（一次性拿到 IP/掩码/网关/DHCP/DNS）
-- **公网 IP**：`http.Get("https://ifconfig.me")`，三平台统一
-- **子网掩码**：macOS ifconfig 返回十六进制 `0xffffff00` → 转点分十进制；Linux/Windows 直接点分十进制
+  - **macOS**：`ifconfig`、`scutil --dns`、`netstat -bi`
+  - **Linux**：`ip addr`、`resolvectl status` 或 `/etc/resolv.conf`、`/proc/net/dev`
+  - **Windows**：`ipconfig /all`
+- **子网掩码**：macOS ifconfig 返回十六进制 `0xffffff00` → 转点分十进制；Linux 由 CIDR 转换；Windows 直接点分
 - **实现**：`collectNetworkInfo() []string`，内部 `switch runtime.GOOS`
 
 ### 6. 打开网页
